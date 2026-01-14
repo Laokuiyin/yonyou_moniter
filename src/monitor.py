@@ -208,8 +208,10 @@ class HKEXMonitor:
     """港交所披露易监控"""
 
     BASE_URL = "https://www.hkexnews.hk"
-    SEARCH_URL = f"{BASE_URL}/diy/search"
-    RSS_URL = f"{BASE_URL}/diy/rss/rss.jsp"
+    # 使用港交所披露易搜索API
+    SEARCH_API = f"{BASE_URL}/hkex/web/special-news-api"
+    # RSS订阅源（备用）
+    RSS_URL = f"{BASE_URL}/di/rss/rss.asp"
 
     def __init__(self, dedup: DedupManager):
         self.dedup = dedup
@@ -217,21 +219,80 @@ class HKEXMonitor:
     def monitor_new_listings(self) -> List[Dict]:
         """监控新上市文件"""
         results = []
-        url = f"{self.SEARCH_URL}?query=Yonyou&category=new_listings"
 
+        # 方案1: 使用RSS订阅源（更稳定）
         try:
-            response = Fetcher.get(url)
-            if not response:
+            logger.info("Trying RSS feed...")
+            results = self._fetch_rss_feed()
+            if results:
                 return results
+        except Exception as e:
+            logger.debug(f"RSS feed failed: {e}")
 
-            # 尝试解析JSON API
-            if "application/json" in response.headers.get("Content-Type", ""):
-                return self._parse_json_response(response.json())
-            else:
-                return self._parse_html_response(response.text)
-
+        # 方案2: 使用搜索API（POST请求）
+        try:
+            logger.info("Trying search API...")
+            results = self._fetch_search_api()
         except Exception as e:
             logger.error(f"HKEX monitoring error: {e}")
+
+        return results
+
+    def _fetch_rss_feed(self) -> List[Dict]:
+        """使用RSS订阅源获取最新公告"""
+        # RSS URL: 搜索包含"Yonyou"的公司公告
+        url = f"{self.BASE_URL}/di/rss/rss.asp?alertId=1&companyName=Yonyou&documentType=NEW_LISTING"
+
+        response = Fetcher.get(url, headers={"Accept": "application/rss+xml, text/xml"})
+        if not response:
+            return []
+
+        return self._parse_rss(response.text)
+
+    def _fetch_search_api(self) -> List[Dict]:
+        """使用港交所搜索API"""
+        url = self.SEARCH_API
+
+        # 构造搜索参数
+        params = {
+            "lang": "EN",
+            "searchType": "ALL",
+            "companyName": "Yonyou",
+            "documentType": "NEW_LISTING",
+            "pageSize": 50
+        }
+
+        response = Fetcher.get(url, headers={"Accept": "application/json"})
+        if not response:
+            return []
+
+        return self._parse_json_response(response.json())
+
+    def _parse_rss(self, rss_content: str) -> List[Dict]:
+        """解析RSS内容"""
+        results = []
+        soup = BeautifulSoup(rss_content, "xml") or BeautifulSoup(rss_content, "html.parser")
+
+        for item in soup.find_all("item")[:50]:  # 限制50条
+            title = item.find("title")
+            link = item.find("link")
+            pub_date = item.find("pubDate")
+
+            if not title or not link:
+                continue
+
+            title_text = title.get_text(strip=True)
+            link_text = link.get_text(strip=True)
+            date_text = pub_date.get_text(strip=True) if pub_date else datetime.now().strftime("%Y-%m-%d")
+
+            parsed = self._process_item({
+                "title": title_text,
+                "url": link_text,
+                "date": date_text
+            })
+
+            if parsed:
+                results.append(parsed)
 
         return results
 
