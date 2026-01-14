@@ -54,6 +54,8 @@ jobs:
         run: |
           echo "TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}" >> $GITHUB_ENV
           echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> $GITHUB_ENV
+          echo "FEISHU_WEBHOOK_URL=${{ secrets.FEISHU_WEBHOOK_URL }}" >> $GITHUB_ENV
+          echo "FEISHU_SIGN_SECRET=${{ secrets.FEISHU_SIGN_SECRET }}" >> $GITHUB_ENV
           echo "DATA_DIR=./data" >> $GITHUB_ENV
           echo "TEST_MODE=${{ github.event.inputs.test_mode == 'true' }}" >> $GITHUB_ENV
 

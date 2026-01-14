@@ -9,6 +9,10 @@ import json
 import hashlib
 import logging
 import asyncio
+import hmac
+import base64
+import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, List, Set
@@ -26,6 +30,10 @@ from telegram.error import TelegramError
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Feishu Configuration
+FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
+FEISHU_SIGN_SECRET = os.getenv("FEISHU_SIGN_SECRET")  # 可选，用于签名校验
 
 # Data persistence paths (GitHub Actions compatible)
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
@@ -538,6 +546,138 @@ class TelegramNotifier:
 
 
 # =============================================================================
+# Feishu Notifier
+# =============================================================================
+
+class FeishuNotifier:
+    """飞书推送通知"""
+
+    def __init__(self):
+        if not FEISHU_WEBHOOK_URL:
+            raise ValueError("FEISHU_WEBHOOK_URL must be set")
+        self.webhook_url = FEISHU_WEBHOOK_URL
+        self.sign_secret = FEISHU_SIGN_SECRET
+
+    def send_alert(self, event: Dict):
+        """发送事件提醒"""
+        message = self._format_message(event)
+
+        try:
+            self._send_message(message)
+            logger.info(f"Alert sent to Feishu: {event['title'][:50]}")
+        except Exception as e:
+            logger.error(f"Feishu error: {e}")
+
+    def _generate_sign(self, timestamp: int) -> Optional[str]:
+        """生成飞书机器人签名
+
+        Args:
+            timestamp: 当前时间戳（秒）
+
+        Returns:
+            Base64编码的签名，如果未配置密钥则返回None
+        """
+        if not self.sign_secret:
+            return None
+
+        # 拼接签名字符串：timestamp + "\n" + secret
+        string_to_sign = f"{timestamp}\n{self.sign_secret}"
+
+        # 使用HMAC-SHA256加密
+        hmac_code = hmac.new(
+            self.sign_secret.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
+            digestmod=hashlib.sha256
+        ).digest()
+
+        # Base64编码
+        sign = base64.b64encode(hmac_code).decode('utf-8')
+
+        return sign
+
+    def _send_message(self, message: str):
+        """发送消息到飞书"""
+        # 飞书卡片消息格式
+        card_content = {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "📢 用友港股上市 · 关键进展"
+                    },
+                    "template": "blue"
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "lark_md",
+                            "content": message
+                        }
+                    }
+                ]
+            }
+        }
+
+        # 准备请求URL
+        url = self.webhook_url
+        if self.sign_secret:
+            # 生成时间戳和签名
+            timestamp = int(time.time())
+            sign = self._generate_sign(timestamp)
+
+            # 将签名参数添加到 URL
+            params = urllib.parse.urlencode({
+                "timestamp": str(timestamp),
+                "sign": sign
+            })
+            url = f"{self.webhook_url}?{params}"
+            logger.debug(f"Using signature verification: timestamp={timestamp}")
+
+        response = requests.post(
+            url,
+            json=card_content,
+            timeout=10
+        )
+        response.raise_for_status()
+
+        # 检查返回状态
+        data = response.json()
+        if data.get("code") != 0:
+            raise Exception(f"Feishu API error: {data.get('msg')}")
+
+    def _format_message(self, event: Dict) -> str:
+        """格式化推送消息（飞书 Markdown 格式）"""
+        event_type_names = {
+            "prospectus": "正式招股说明书（Prospectus）",
+            "global_offering": "全球发售 / Global Offering",
+            "price_range": "价格区间 / Price Range",
+            "allocation": "配售结果 / Allocation Results",
+            "h_share_details": "H股发行详情",
+        }
+
+        event_name = event_type_names.get(event["event_type"], event["event_type"])
+
+        # 使用飞书 Markdown 格式
+        message = f"""**事件类型：** {event_name}
+**日期：** {event['date']}
+**来源：** {event['source']}
+**重要性：** {event['importance']}
+
+**链接：** [{event['title']}]({event['url']})"""
+
+        # 添加高级信息
+        advanced_info = EventAnalyzer.extract_advanced_info(event["title"])
+        if advanced_info:
+            message += "\n\n**附加信息：**"
+            for key, value in advanced_info.items():
+                message += f"\n• {value}"
+
+        return message
+
+
+# =============================================================================
 # Main Orchestrator
 # =============================================================================
 
@@ -552,20 +692,33 @@ def main():
 
     if test_mode:
         logger.info("Running in TEST MODE - sending test notification...")
-        try:
-            notifier = TelegramNotifier()
-            test_event = {
-                "source": "TEST",
-                "title": "【测试】用友港股上市监控系统",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "url": "https://github.com/Laokuiyin/yonyou_moniter",
-                "event_type": "prospectus",
-                "importance": "TEST"
-            }
-            notifier.send_alert(test_event)
-            logger.info("Test notification sent successfully!")
-        except Exception as e:
-            logger.error(f"Test notification failed: {e}")
+        test_event = {
+            "source": "TEST",
+            "title": "【测试】用友港股上市监控系统",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "url": "https://github.com/Laokuiyin/yonyou_moniter",
+            "event_type": "prospectus",
+            "importance": "TEST"
+        }
+
+        # 尝试使用飞书
+        if FEISHU_WEBHOOK_URL:
+            try:
+                notifier = FeishuNotifier()
+                notifier.send_alert(test_event)
+                logger.info("Test notification sent to Feishu!")
+            except Exception as e:
+                logger.error(f"Feishu test failed: {e}")
+
+        # 尝试使用 Telegram
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                notifier = TelegramNotifier()
+                notifier.send_alert(test_event)
+                logger.info("Test notification sent to Telegram!")
+            except Exception as e:
+                logger.error(f"Telegram test failed: {e}")
+
         logger.info("Test completed")
         return
 
@@ -592,12 +745,26 @@ def main():
 
     # 发送通知
     logger.info(f"Sending {len(all_events)} notifications...")
-    try:
-        notifier = TelegramNotifier()
-        for event in all_events:
-            notifier.send_alert(event)
-    except Exception as e:
-        logger.error(f"Notification failed: {e}")
+
+    # 使用飞书发送
+    if FEISHU_WEBHOOK_URL:
+        try:
+            notifier = FeishuNotifier()
+            for event in all_events:
+                notifier.send_alert(event)
+            logger.info(f"Sent {len(all_events)} notifications to Feishu")
+        except Exception as e:
+            logger.error(f"Feishu notification failed: {e}")
+
+    # 使用 Telegram 发送
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            notifier = TelegramNotifier()
+            for event in all_events:
+                notifier.send_alert(event)
+            logger.info(f"Sent {len(all_events)} notifications to Telegram")
+        except Exception as e:
+            logger.error(f"Telegram notification failed: {e}")
 
     logger.info("Monitoring completed")
 

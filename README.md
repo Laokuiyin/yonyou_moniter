@@ -7,7 +7,7 @@ Python + GitHub Actions 自动化监控用友网络（Yonyou）赴港上市关�
 - **A 股公告监控**：巨潮资讯 H 股相关公告
 - **智能过滤**：只捕捉关键上市事件，自动过滤噪音
 - **持久化去重**：GitHub Actions 无状态环境下的公告去重
-- **Telegram 推送**：实时消息推送
+- **多平台推送**：支持 Telegram、飞书，可同时使用或二选一
 - **测试模式**：支持手动测试推送功能
 
 > **注意**：港交所披露易（HKEXnews）监控已禁用，需要申请 API key 后方可启用。
@@ -24,7 +24,29 @@ Python + GitHub Actions 自动化监控用友网络（Yonyou）赴港上市关�
 
 ## 快速开始
 
-### 1. 准备 Telegram Bot
+### 方案一：使用飞书推送（推荐）
+
+#### 1. 准备飞书机器人
+
+```bash
+# 1. 在飞书中创建一个群聊（可以只有你自己）
+# 2. 进入群聊，点击右上角 "..." → 群机器人
+# 3. 点击 "添加机器人" → 选择 "自定义机器人"
+# 4. 设置机器人名称和描述，点击 "添加"
+# 5. 复制生成的 Webhook URL（格式：https://open.feishu.cn/open-apis/bot/v2/hook/xxx）
+```
+
+#### 2. 配置 GitHub Secrets
+
+在 GitHub 仓库设置中添加以下 Secret：
+
+| Secret 名称 | 值 |
+|------------|---|
+| `FEISHU_WEBHOOK_URL` | 飞书机器人的 Webhook URL |
+
+### 方案二：使用 Telegram 推送
+
+#### 1. 准备 Telegram Bot
 
 ```bash
 # 1. 在 Telegram 中搜索 @BotFather
@@ -34,7 +56,7 @@ Python + GitHub Actions 自动化监控用友网络（Yonyou）赴港上市关�
 curl https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 ```
 
-### 2. 配置 GitHub Secrets
+#### 2. 配置 GitHub Secrets
 
 在 GitHub 仓库设置中添加以下 Secrets：
 
@@ -43,7 +65,9 @@ curl https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 | `TELEGRAM_BOT_TOKEN` | 你的 Bot Token（格式：`123456789:ABC...`） |
 | `TELEGRAM_CHAT_ID` | 你的 Chat ID（纯数字） |
 
-### 3. 测试 Telegram 推送
+> **提示**：你可以同时配置 Telegram 和飞书，系统会向两个平台都发送通知。
+
+### 3. 测试推送功能
 
 1. 进入仓库 **Actions** 页面
 2. 点击 **"Yonyou HK Listing Monitor"**
@@ -51,7 +75,7 @@ curl https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 4. **勾选** "Test mode" ✅
 5. 点击 **"Run workflow"**
 
-如果配置正确，你会收到测试消息。
+如果配置正确，你会在飞书/Telegram 收到测试消息。
 
 ### 4. 启用自动监控
 
@@ -143,7 +167,8 @@ schedule:
 
 | 问题 | 解决方法 |
 |------|----------|
-| 收不到消息 | 检查 Telegram Token 和 Chat ID 是否正确 |
+| 收不到飞书消息 | 检查 Webhook URL 是否正确，确认机器人没有被移除 |
+| 收不到 Telegram 消息 | 检查 Token 和 Chat ID 是否正确，确认给 Bot 发送过消息 |
 | Actions 运行失败 | 查看 Actions 日志中的错误信息 |
 | 没有新公告 | 正常情况，只有在检测到关键事件时才会推送 |
 
