@@ -4,7 +4,7 @@ Python + GitHub Actions 自动化监控用友网络（Yonyou）赴港上市关�
 
 ## 功能特性
 
-- **A 股公告监控**：巨潮资讯 H 股相关公告
+- **A 股公告监控**：东方财富网 H 股相关公告
 - **智能过滤**：只捕捉关键上市事件，自动过滤噪音
 - **持久化去重**：GitHub Actions 无状态环境下的公告去重
 - **多平台推送**：支持 Telegram、飞书，可同时使用或二选一
@@ -135,9 +135,31 @@ yonyou_hk_monitor/
 【用友港股上市 · 关键进展】
 事件：正式招股说明书（Prospectus）
 日期：2026-XX-XX
-来源：CNINFO
+来源：EASTMONEY
 链接：https://...
 重要性：HIGH
+```
+
+## 技术说明
+
+### 数据源
+
+- **东方财富网 API**：用于获取A股公告（用友网络 600588）
+  - 稳定可靠，无需额外认证
+  - 只需股票代码即可查询
+  - 支持查询最近N天的公告（默认7天）
+
+- **港交所披露易（已禁用）**：需要申请 API key 后方可启用
+  - 访问 https://www.hkexnews.hk/ 申请
+  - 在 `src/monitor.py` 中取消注释 `HKEXMonitor` 相关代码
+
+### 测试API连接
+
+项目提供了测试脚本验证API功能：
+
+```bash
+# 测试东方财富API
+python test_eastmoney_api.py
 ```
 
 ## 高级配置
@@ -154,14 +176,6 @@ schedule:
 ```
 
 **注意**：GitHub Actions 使用 UTC 时区，北京时间 = UTC + 8
-
-### 启用港交所监控
-
-如需启用港交所披露易监控：
-
-1. 访问 https://www.hkexnews.hk/ 申请 API key
-2. 将 key 添加到 GitHub Secrets
-3. 修改 `src/monitor.py` 中的 `HKEXMonitor` 类
 
 ## 故障排查
 
