@@ -8,6 +8,7 @@ import os
 import json
 import hashlib
 import logging
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, List, Set
@@ -492,15 +493,20 @@ class TelegramNotifier:
         message = self._format_message(event)
 
         try:
-            self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
+            # 使用 asyncio 运行异步方法
+            asyncio.run(self._send_message_async(message))
             logger.info(f"Alert sent: {event['title'][:50]}")
-        except TelegramError as e:
+        except Exception as e:
             logger.error(f"Telegram error: {e}")
+
+    async def _send_message_async(self, message: str):
+        """异步发送消息"""
+        await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=message,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
 
     def _format_message(self, event: Dict) -> str:
         """格式化推送消息"""
