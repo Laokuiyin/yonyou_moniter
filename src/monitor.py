@@ -13,7 +13,7 @@ import hmac
 import base64
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, List, Set
 import re
@@ -404,82 +404,216 @@ class HKEXMonitor:
 # =============================================================================
 
 class AShareMonitor:
-    """A股公告监控（上交所/巨潮资讯）"""
+    """A股公告监控（东方财富API）"""
 
-    def __init__(self, dedup: DedupManager):
+    # 东方财富公告API
+    API_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+
+    # 用友网络股票代码
+    STOCK_CODE = "600588"
+
+    # API请求头
+    API_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"https://data.eastmoney.com/notices/stock/{STOCK_CODE}.html"
+    }
+
+    def __init__(self, dedup: DedupManager, days_back: int = 7):
+        """
+        初始化A股监控器
+
+        Args:
+            dedup: 去重管理器
+            days_back: 查询最近N天的公告（默认7天）
+        """
         self.dedup = dedup
+        self.days_back = days_back
 
     def monitor_announcements(self) -> List[Dict]:
-        """监控H股相关公告"""
+        """
+        监控H股相关公告
+
+        通过东方财富API查询指定日期范围内的公告，
+        筛选出H股相关的关键事件。
+        """
         results = []
 
-        # 巨潮资讯搜索URL
-        search_urls = [
-            "http://www.cninfo.com.cn/new/fulltextSearch?notautosubmit=&keyword=Yonyou",
-            "http://www.cninfo.com.cn/new/fulltextSearch?notautosubmit=&keyword=用友网络",
-        ]
+        logger.info(f"Querying Eastmoney API for last {self.days_back} days")
 
-        for url in search_urls:
+        # 构造API请求参数
+        params = {
+            "sr": "-1",  # 按日期降序
+            "page_size": "100",  # 获取更多公告
+            "page_index": "1",
+            "ann_type": "A",  # 全部公告
+            "client_source": "web",
+            "stock_list": self.STOCK_CODE,
+            "f_node": "0",
+            "s_node": "0"
+        }
+
+        try:
+            # 添加请求延迟
+            time.sleep(1)
+
+            response = self._call_api(params)
+            if not response:
+                logger.warning("No response from Eastmoney API")
+                return results
+
+            # 解析API响应
+            results = self._parse_api_response(response)
+
+        except Exception as e:
+            logger.error(f"A-share monitoring error: {e}")
+
+        return results
+
+    def _call_api(self, params: dict) -> Optional[dict]:
+        """
+        调用东方财富API
+
+        Args:
+            params: GET请求参数
+
+        Returns:
+            API响应的JSON数据，失败返回None
+        """
+        try:
+            logger.debug(f"API request: stock={params['stock_list']}, page_size={params['page_size']}")
+
+            response = requests.get(
+                self.API_URL,
+                params=params,
+                headers=self.API_HEADERS,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            # 检查是否有数据
+            if not result.get("data") or not result["data"].get("list"):
+                logger.debug("API returned no announcements")
+                return None
+
+            return result
+
+        except requests.RequestException as e:
+            logger.error(f"API request failed: {e}")
+            return None
+        except ValueError as e:
+            logger.error(f"Failed to parse API JSON response: {e}")
+            return None
+
+    def _parse_api_response(self, api_response: dict) -> List[Dict]:
+        """
+        解析东方财富API响应
+
+        Args:
+            api_response: API返回的JSON数据
+
+        Returns:
+            符合条件的事件列表
+        """
+        results = []
+
+        if not api_response or "data" not in api_response:
+            logger.debug("Invalid API response structure")
+            return results
+
+        announcements = api_response.get("data", {}).get("list", [])
+
+        if not announcements:
+            logger.debug("No announcements in API response")
+            return results
+
+        logger.info(f"Processing {len(announcements)} announcements from Eastmoney API")
+
+        # 计算日期筛选边界
+        cutoff_date = datetime.now() - timedelta(days=self.days_back)
+
+        for ann in announcements:
             try:
-                response = Fetcher.get(url, headers={"Accept-Language": "zh-CN,zh;q=0.9"})
-                if not response:
+                # 提取公告信息
+                title = ann.get("title", "")
+                notice_date_str = ann.get("notice_date", "")
+                art_code = ann.get("art_code", "")
+
+                # 解析日期
+                try:
+                    notice_date = datetime.strptime(notice_date_str.split()[0], "%Y-%m-%d")
+                except (ValueError, IndexError):
+                    logger.debug(f"Invalid date format: {notice_date_str}")
                     continue
 
-                items = self._parse_cninfo(response.text)
-                results.extend(items)
+                # 日期筛选：只处理最近N天的公告
+                if notice_date < cutoff_date:
+                    continue
+
+                # 格式化日期字符串
+                date_str = notice_date.strftime("%Y-%m-%d")
+
+                # 构造公告详情页URL
+                url = f"https://data.eastmoney.com/notices/detail/{art_code}.html"
+
+                # 筛选：只处理H股相关公告
+                if not self._is_h_share_related(title):
+                    logger.debug(f"Skipping non-H-share announcement: {title[:50]}")
+                    continue
+
+                # 筛选：排除噪音
+                if EventAnalyzer.contains_exclude_keywords(title):
+                    logger.debug(f"Excluding by keywords: {title[:50]}")
+                    continue
+
+                # 去重检查
+                item_hash = self.dedup.generate_hash(title, date_str, url)
+                if self.dedup.is_seen(item_hash):
+                    logger.debug(f"Already seen: {title[:50]}")
+                    continue
+
+                # 识别事件类型
+                event_type = EventAnalyzer.identify_event_type(title)
+                if not event_type:
+                    logger.debug(f"No critical event matched: {title[:50]}")
+                    continue
+
+                # 标记为已处理
+                self.dedup.mark_seen(item_hash)
+
+                # 构造返回结果
+                results.append({
+                    "source": "EASTMONEY",
+                    "title": title,
+                    "date": date_str,
+                    "url": url,
+                    "event_type": event_type,
+                    "importance": "HIGH"
+                })
+
+                logger.info(f"✓ Matched H-share critical event: {title[:50]}")
 
             except Exception as e:
-                logger.error(f"A-share monitoring error for {url}: {e}")
+                logger.warning(f"Error processing announcement: {e}")
+                continue
 
         return results
 
-    def _parse_cninfo(self, html: str) -> List[Dict]:
-        """解析巨潮资讯响应"""
-        results = []
-        soup = BeautifulSoup(html, "html.parser")
+    def _is_h_share_related(self, title: str) -> bool:
+        """
+        判断公告是否与H股相关
 
-        for item in soup.select(".result-item, .news-item, tr"):
-            title_elem = item.select_one("a[title], .title")
-            date_elem = item.select_one(".date, time")
-            link_elem = item.select_one("a[href]")
+        Args:
+            title: 公告标题
 
-            if not title_elem or not link_elem:
-                continue
+        Returns:
+            True如果包含H股相关关键词
+        """
+        h_share_keywords = ["H股", "H SHARE", "境外上市", "香港", "境外", "发行H股", "H股上市"]
+        title_upper = title.upper()
 
-            title = title_elem.get_text(strip=True) or title_elem.get("title", "").strip()
-            date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
-            link = link_elem.get("href", "")
-
-            # 只处理H股相关公告
-            if not any(kw in title.upper() for kw in ["H股", "H SHARE", "境外上市", "香港"]):
-                continue
-
-            # 排除噪音
-            if EventAnalyzer.contains_exclude_keywords(title):
-                continue
-
-            # 去重
-            item_hash = self.dedup.generate_hash(title, date_str, link)
-            if self.dedup.is_seen(item_hash):
-                continue
-
-            # 识别事件类型
-            event_type = EventAnalyzer.identify_event_type(title)
-            if not event_type:
-                continue
-
-            self.dedup.mark_seen(item_hash)
-
-            results.append({
-                "source": "CNINFO",
-                "title": title,
-                "date": date_str,
-                "url": link,
-                "event_type": event_type,
-                "importance": "HIGH"
-            })
-
-        return results
+        return any(kw in title_upper for kw in h_share_keywords)
 
 
 # =============================================================================
