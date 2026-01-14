@@ -504,7 +504,7 @@ class TelegramNotifier:
         await self.bot.send_message(
             chat_id=self.chat_id,
             text=message,
-            parse_mode="Markdown",
+            parse_mode=None,  # 使用纯文本，避免 Markdown 解析错误
             disable_web_page_preview=True
         )
 
