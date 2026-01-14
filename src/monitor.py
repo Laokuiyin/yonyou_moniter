@@ -541,24 +541,44 @@ def main():
     logger.info("Yonyou HK Listing Monitor Started")
     logger.info("=" * 60)
 
+    # 检查是否为测试模式
+    test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+
+    if test_mode:
+        logger.info("Running in TEST MODE - sending test notification...")
+        try:
+            notifier = TelegramNotifier()
+            test_event = {
+                "source": "TEST",
+                "title": "【测试】用友港股上市监控系统",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "url": "https://github.com/Laokuiyin/yonyou_moniter",
+                "event_type": "prospectus",
+                "importance": "TEST"
+            }
+            notifier.send_alert(test_event)
+            logger.info("Test notification sent successfully!")
+        except Exception as e:
+            logger.error(f"Test notification failed: {e}")
+        logger.info("Test completed")
+        return
+
     # 初始化去重管理器
     dedup = DedupManager(SEEN_HASHES_FILE)
     logger.info(f"Loaded {len(dedup.seen_hashes)} seen hashes")
 
-    # 监控港交所
-    logger.info("Monitoring HKEXnews...")
-    hkex_monitor = HKEXMonitor(dedup)
-    hkex_events = hkex_monitor.monitor_new_listings()
-    logger.info(f"HKEXnews: {len(hkex_events)} new critical events")
+    all_events = []
+
+    # 港交所监控已禁用（需要申请 API key）
+    logger.info("HKEXnews monitoring: DISABLED (requires API key registration)")
+    logger.info("To enable HKEX monitoring, register at: https://www.hkexnews.hk/")
 
     # 监控A股公告
     logger.info("Monitoring A-share announcements...")
     ashare_monitor = AShareMonitor(dedup)
     ashare_events = ashare_monitor.monitor_announcements()
     logger.info(f"A-share: {len(ashare_events)} new critical events")
-
-    # 汇总事件
-    all_events = hkex_events + ashare_events
+    all_events.extend(ashare_events)
 
     if not all_events:
         logger.info("No new critical events found")
