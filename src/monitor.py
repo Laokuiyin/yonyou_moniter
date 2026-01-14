@@ -208,10 +208,10 @@ class HKEXMonitor:
     """港交所披露易监控"""
 
     BASE_URL = "https://www.hkexnews.hk"
-    # 使用港交所披露易搜索API
-    SEARCH_API = f"{BASE_URL}/hkex/web/special-news-api"
-    # RSS订阅源（备用）
-    RSS_URL = f"{BASE_URL}/di/rss/rss.asp"
+    # 港交所搜索API v2
+    SEARCH_API = f"{BASE_URL}/hkex_api/data/get/search"
+    # 新上市页面
+    NEW_LISTINGS_URL = f"{BASE_URL}/new-listing"
 
     def __init__(self, dedup: DedupManager):
         self.dedup = dedup
@@ -220,115 +220,132 @@ class HKEXMonitor:
         """监控新上市文件"""
         results = []
 
-        # 方案1: 使用RSS订阅源（更稳定）
+        # 方案1: 使用港交所搜索API
         try:
-            logger.info("Trying RSS feed...")
-            results = self._fetch_rss_feed()
+            logger.info("Trying HKEX search API v2...")
+            results = self._fetch_search_api()
             if results:
                 return results
         except Exception as e:
-            logger.debug(f"RSS feed failed: {e}")
+            logger.debug(f"Search API failed: {e}")
 
-        # 方案2: 使用搜索API（POST请求）
+        # 方案2: 解析新上市页面HTML
         try:
-            logger.info("Trying search API...")
-            results = self._fetch_search_api()
+            logger.info("Trying to parse new listings page...")
+            results = self._fetch_new_listings_page()
         except Exception as e:
             logger.error(f"HKEX monitoring error: {e}")
 
         return results
 
-    def _fetch_rss_feed(self) -> List[Dict]:
-        """使用RSS订阅源获取最新公告"""
-        # RSS URL: 搜索包含"Yonyou"的公司公告
-        url = f"{self.BASE_URL}/di/rss/rss.asp?alertId=1&companyName=Yonyou&documentType=NEW_LISTING"
-
-        response = Fetcher.get(url, headers={"Accept": "application/rss+xml, text/xml"})
-        if not response:
-            return []
-
-        return self._parse_rss(response.text)
-
     def _fetch_search_api(self) -> List[Dict]:
-        """使用港交所搜索API"""
+        """使用港交所搜索API v2"""
         url = self.SEARCH_API
 
-        # 构造搜索参数
+        # 港交所搜索参数
         params = {
             "lang": "EN",
             "searchType": "ALL",
             "companyName": "Yonyou",
-            "documentType": "NEW_LISTING",
-            "pageSize": 50
+            "documentType": ["NEW_LISTING", "PROSPECTUS"],
+            "size": 50
         }
 
-        response = Fetcher.get(url, headers={"Accept": "application/json"})
+        response = Fetcher.get(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+        )
         if not response:
             return []
 
-        return self._parse_json_response(response.json())
+        try:
+            data = response.json()
+            return self._parse_search_results(data)
+        except Exception as e:
+            logger.debug(f"Failed to parse JSON: {e}")
+            return []
 
-    def _parse_rss(self, rss_content: str) -> List[Dict]:
-        """解析RSS内容"""
+    def _fetch_new_listings_page(self) -> List[Dict]:
+        """解析新上市页面"""
+        url = self.NEW_LISTINGS_URL
+
+        response = Fetcher.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }
+        )
+        if not response:
+            return []
+
+        return self._parse_new_listings_html(response.text)
+
+    def _parse_search_results(self, data: dict) -> List[Dict]:
+        """解析搜索API结果"""
         results = []
-        soup = BeautifulSoup(rss_content, "xml") or BeautifulSoup(rss_content, "html.parser")
 
-        for item in soup.find_all("item")[:50]:  # 限制50条
-            title = item.find("title")
-            link = item.find("link")
-            pub_date = item.find("pubDate")
+        # 港交所API可能返回不同的结构
+        if "hits" in data:
+            items = data["hits"]
+        elif "results" in data:
+            items = data["results"]
+        elif "data" in data:
+            items = data["data"]
+        else:
+            items = []
 
-            if not title or not link:
-                continue
+        for item in items:
+            if isinstance(item, dict):
+                # 处理不同的字段名
+                title = item.get("title") or item.get("docTitle") or item.get("header", "")
+                date_str = item.get("date") or item.get("publishDate") or item.get("dateTime", "")
+                url = item.get("url") or item.get("docLink") or item.get("link", "")
 
-            title_text = title.get_text(strip=True)
-            link_text = link.get_text(strip=True)
-            date_text = pub_date.get_text(strip=True) if pub_date else datetime.now().strftime("%Y-%m-%d")
-
-            parsed = self._process_item({
-                "title": title_text,
-                "url": link_text,
-                "date": date_text
-            })
-
-            if parsed:
-                results.append(parsed)
+                if title and url:
+                    parsed = self._process_item({
+                        "title": title,
+                        "date": date_str,
+                        "url": url
+                    })
+                    if parsed:
+                        results.append(parsed)
 
         return results
 
-    def _parse_json_response(self, data: dict) -> List[Dict]:
-        """解析JSON响应"""
-        results = []
-        # 根据实际API结构调整
-        for item in data.get("results", []):
-            parsed = self._process_item(item)
-            if parsed:
-                results.append(parsed)
-        return results
-
-    def _parse_html_response(self, html: str) -> List[Dict]:
-        """解析HTML响应"""
+    def _parse_new_listings_html(self, html: str) -> List[Dict]:
+        """解析新上市页面HTML"""
         results = []
         soup = BeautifulSoup(html, "html.parser")
 
-        # 根据实际HTML结构调整选择器
-        for row in soup.select("tr.search-item, .news-item, .listing-item"):
-            title_elem = row.select_one("a[title], .title, .news-title")
-            date_elem = row.select_one(".date, .news-date, time")
-            link_elem = row.select_one("a[href]")
-
-            if not title_elem or not link_elem:
+        # 港交所新上市页面的选择器（需要根据实际页面调整）
+        for row in soup.select("tr, .news-item, .listing-item, [class*='listing'], [class*='news']"):
+            title_elem = row.select_one("a[href]")
+            if not title_elem:
                 continue
 
-            title = title_elem.get_text(strip=True) or title_elem.get("title", "").strip()
-            date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
-            link = link_elem.get("href", "")
+            title = title_elem.get_text(strip=True)
+            link = title_elem.get("href", "")
+
+            if not link:
+                continue
 
             if link.startswith("/"):
                 link = f"{self.BASE_URL}{link}"
 
-            item = {"title": title, "date": date_str, "url": link}
-            parsed = self._process_item(item)
+            # 查找日期
+            date_elem = row.select_one(".date, time, [class*='date'], [class*='time']")
+            date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
+
+            parsed = self._process_item({
+                "title": title,
+                "date": date_str,
+                "url": link
+            })
+
             if parsed:
                 results.append(parsed)
 
